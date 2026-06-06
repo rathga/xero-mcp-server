@@ -8,7 +8,7 @@ import { updateXeroManualJournal } from "../../handlers/update-xero-manual-journ
 
 const UpdateManualJournalTool = CreateXeroTool(
   "update-manual-journal",
-  "Update a manual journal in Xero. Only works on draft manual journals.\
+  "Update a manual journal in Xero. Works on both draft and posted manual journals.\
   Do not modify line items or parameters that have not been specified by the user.",
   {
     narration: z
