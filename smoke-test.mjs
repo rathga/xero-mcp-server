@@ -22,6 +22,11 @@ import { getXeroInvoiceAsPdf } from "./dist/handlers/get-xero-invoice-as-pdf.han
 import { getEntityHistory } from "./dist/handlers/history-handler-factory.js";
 import { createXeroAccount } from "./dist/handlers/create-xero-account.handler.js";
 import { archiveXeroAccount } from "./dist/handlers/archive-xero-account.handler.js";
+import { listXeroOverpayments } from "./dist/handlers/list-xero-overpayments.handler.js";
+import { listXeroPrepayments } from "./dist/handlers/list-xero-prepayments.handler.js";
+import { createXeroCreditNoteAllocation } from "./dist/handlers/create-xero-credit-note-allocation.handler.js";
+import { createXeroOverpaymentAllocation } from "./dist/handlers/create-xero-overpayment-allocation.handler.js";
+import { createXeroPrepaymentAllocation } from "./dist/handlers/create-xero-prepayment-allocation.handler.js";
 import { xeroClient } from "./dist/clients/xero-client.js";
 
 const results = [];
@@ -141,6 +146,84 @@ await test("account create then archive (#148)", async () => {
   if (archived.status !== "ARCHIVED") throw new Error(`expected ARCHIVED, got ${archived.status}`);
   createdAccountId = null; // archived = cleaned up
   pass("account create then archive (#148)", `created ${code} (${created.accountID}) → status ${archived.status}`);
+});
+
+// ---- Allocations: list tools (read-only) ----
+let opWithBalance, ppWithBalance;
+await test("list-overpayments (#187)", async () => {
+  const ops = unwrap(await listXeroOverpayments(1, undefined, 10));
+  opWithBalance = (ops ?? []).find(o => (o.remainingCredit ?? 0) > 0);
+  pass("list-overpayments (#187)", `${ops?.length ?? 0} overpayment(s); ${opWithBalance ? "one has balance" : "none with balance"}`);
+});
+await test("list-prepayments (#187)", async () => {
+  const pps = unwrap(await listXeroPrepayments(1, undefined, 10));
+  ppWithBalance = (pps ?? []).find(p => (p.remainingCredit ?? 0) > 0);
+  pass("list-prepayments (#187)", `${pps?.length ?? 0} prepayment(s); ${ppWithBalance ? "one has balance" : "none with balance"}`);
+});
+
+// ---- create-credit-note-allocation: self-contained fixture, fully cleaned up ----
+await test("create-credit-note-allocation (#187)", async () => {
+  const today = new Date().toISOString().split("T")[0];
+  const accResp = await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="REVENUE"');
+  const revCode = accResp.body.accounts?.[0]?.code;
+  if (!revCode) throw new Error("no REVENUE account found for fixture");
+  const contactResp = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: `ZZZ Alloc Test ${Date.now()}` }] });
+  const contactID = contactResp.body.contacts?.[0]?.contactID;
+  const invResp = await xeroClient.accountingApi.createInvoices(xeroClient.tenantId, { invoices: [{
+    type: "ACCREC", contact: { contactID }, date: today, dueDate: today, status: "AUTHORISED",
+    lineAmountTypes: "NoTax", lineItems: [{ description: "smoke test", quantity: 1, unitAmount: 100, accountCode: revCode }],
+  }] });
+  const invoiceID = invResp.body.invoices?.[0]?.invoiceID;
+  const cnResp = await xeroClient.accountingApi.createCreditNotes(xeroClient.tenantId, { creditNotes: [{
+    type: "ACCRECCREDIT", contact: { contactID }, date: today, status: "AUTHORISED",
+    lineAmountTypes: "NoTax", lineItems: [{ description: "smoke test", quantity: 1, unitAmount: 100, accountCode: revCode }],
+  }] });
+  const creditNoteID = cnResp.body.creditNotes?.[0]?.creditNoteID;
+  try {
+    const applied = unwrap(await createXeroCreditNoteAllocation(creditNoteID, [{ invoiceId: invoiceID, amount: 100, date: today }]));
+    if (!applied.length) throw new Error("no allocation returned");
+    const allocationID = applied[0].allocationID;
+    if (allocationID) await xeroClient.accountingApi.deleteCreditNoteAllocations(xeroClient.tenantId, creditNoteID, allocationID);
+    await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, invoiceID, { invoices: [{ status: "VOIDED" }] });
+    await xeroClient.accountingApi.updateCreditNote(xeroClient.tenantId, creditNoteID, { creditNotes: [{ status: "VOIDED" }] });
+    await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] });
+    pass("create-credit-note-allocation (#187)", `applied 100 to invoice, allocation ${allocationID}, cleaned up`);
+  } catch (e) {
+    // Best-effort cleanup even on failure (comment keeps catch non-empty for eslint no-empty).
+    try { await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, invoiceID, { invoices: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    try { await xeroClient.accountingApi.updateCreditNote(xeroClient.tenantId, creditNoteID, { creditNotes: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    try { await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] }); } catch { /* ignore */ }
+    throw e;
+  }
+});
+
+// ---- overpayment / prepayment allocation: only if a real source with balance exists ----
+await test("create-overpayment-allocation (#187)", async () => {
+  if (!opWithBalance) { pass("create-overpayment-allocation (#187)", "SKIPPED — no overpayment with balance in tenant (cannot create one via API)"); return; }
+  const today = new Date().toISOString().split("T")[0];
+  const contactID = opWithBalance.contact?.contactID;
+  const inv = unwrap(await listXeroInvoices({ where: `Type=="ACCREC" AND Status=="AUTHORISED" AND Contact.ContactID==guid("${contactID}")`, pageSize: 1 }));
+  const target = (inv ?? []).find(i => (i.amountDue ?? 0) > 0);
+  if (!target) { pass("create-overpayment-allocation (#187)", "SKIPPED — overpayment has balance but no matching unpaid invoice for its contact"); return; }
+  const amt = Math.min(0.01, opWithBalance.remainingCredit, target.amountDue);
+  const applied = unwrap(await createXeroOverpaymentAllocation(opWithBalance.overpaymentID, [{ invoiceId: target.invoiceID, amount: amt, date: today }]));
+  const allocationID = applied[0]?.allocationID;
+  if (allocationID) await xeroClient.accountingApi.deleteOverpaymentAllocations(xeroClient.tenantId, opWithBalance.overpaymentID, allocationID);
+  pass("create-overpayment-allocation (#187)", `applied ${amt} then deleted allocation ${allocationID}`);
+});
+
+await test("create-prepayment-allocation (#187)", async () => {
+  if (!ppWithBalance) { pass("create-prepayment-allocation (#187)", "SKIPPED — no prepayment with balance in tenant (cannot create one via API)"); return; }
+  const today = new Date().toISOString().split("T")[0];
+  const contactID = ppWithBalance.contact?.contactID;
+  const inv = unwrap(await listXeroInvoices({ where: `Type=="ACCREC" AND Status=="AUTHORISED" AND Contact.ContactID==guid("${contactID}")`, pageSize: 1 }));
+  const target = (inv ?? []).find(i => (i.amountDue ?? 0) > 0);
+  if (!target) { pass("create-prepayment-allocation (#187)", "SKIPPED — prepayment has balance but no matching unpaid invoice for its contact"); return; }
+  const amt = Math.min(0.01, ppWithBalance.remainingCredit, target.amountDue);
+  const applied = unwrap(await createXeroPrepaymentAllocation(ppWithBalance.prepaymentID, [{ invoiceId: target.invoiceID, amount: amt, date: today }]));
+  const allocationID = applied[0]?.allocationID;
+  if (allocationID) await xeroClient.accountingApi.deletePrepaymentAllocations(xeroClient.tenantId, ppWithBalance.prepaymentID, allocationID);
+  pass("create-prepayment-allocation (#187)", `applied ${amt} then deleted allocation ${allocationID}`);
 });
 
 // ---- cleanup safety net ----
