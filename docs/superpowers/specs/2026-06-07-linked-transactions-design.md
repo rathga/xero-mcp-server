@@ -97,11 +97,29 @@ serialization is a separate path and most Nestegg recharges are contractor bills
 follow-up; the create tool still *accepts* a SPEND `sourceTransactionId` if the agent supplies the
 line ID by other means, but we don't add tooling to surface SPEND line IDs here.
 
-## Error handling / layering / testing
+## Error handling / testing
 
-Standard `formatError` handling, matching every other handler. Pure plumbing (param pass-through +
-trivial object construction), no domain logic → **no unit tests**, per repo convention. Verified by
-build + lint + live smoke.
+Standard `formatError` handling, matching every other handler.
+
+**Upstream test convention (verified, not assumed):** the repo tests **pure helper functions with
+logic** under `src/helpers/__tests__/` (`format-error`, and — via the open PRs — `format-line-item`,
+`format-tracking`, `map-line-amount-type`). It has **no handler or tool tests** on any branch.
+Following that convention:
+
+- **Handlers and tools** (the four new ones) get **no unit tests** — consistent with the entire
+  repo, where handlers/tools are exercised only at runtime. (This is the repo's convention, which
+  happens to align with the parent workspace rule — but the deciding authority here is the upstream
+  repo.)
+- **The `formatLineItem` enabler DOES get a test.** It modifies a pure helper, which is exactly what
+  this repo tests. Add `src/helpers/__tests__/format-line-item.test.ts` asserting the rendered
+  output includes the `Line Item ID: <id>` line, mirroring the existing helper-test style (Vitest,
+  `describe`/`it`/`expect`). Run with `npm test`.
+  - **Note:** this test file does **not** exist on `origin/main` (only the `format-error` test
+    does), so the upstream PR creates it. On `nestegg-fork-integration`, PR #178 also adds a
+    `format-line-item.test.ts`; reconcile the two at merge time (combine cases — both just assert
+    different lines of the same formatter output).
+
+Beyond the helper test, verification is build + lint + live smoke.
 
 ## Verification (live, against the connected tenant)
 

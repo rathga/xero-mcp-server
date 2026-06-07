@@ -93,10 +93,14 @@ multiple invoices in one call for free.
 6. Register the two list tools in `src/tools/list/index.ts` and the three create tools in
    `src/tools/create/index.ts`. No deeplinks (allocations have no standalone Xero UI page).
 
-## Layering / testing
+## Testing
 
-Pure plumbing (param pass-through + trivial wrapper construction), no domain logic, so **no unit
-tests**, per repo convention. Verification is build + lint + live smoke test.
+**Upstream test convention (verified):** the repo unit-tests **pure helper functions with logic**
+in `src/helpers/__tests__/` and has **no handler or tool tests** on any branch. This feature adds
+only handlers, tools, and a Zod schema *declaration* (`allocation-schema.ts`) — none of which the
+repo tests (a raw schema has no logic; the one trivial `toAllocations` mapper lives inside the
+handler, not as a standalone helper). So **no unit tests** are added, consistent with the upstream
+convention. Verification is build + lint + live smoke test.
 
 ## Verification (live, against the connected tenant)
 
