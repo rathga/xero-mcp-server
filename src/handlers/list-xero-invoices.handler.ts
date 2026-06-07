@@ -6,6 +6,7 @@ import { getClientHeaders } from "../helpers/get-client-headers.js";
 
 export interface ListInvoicesParams {
   page?: number;
+  pageSize?: number;
   contactIds?: string[];
   invoiceNumbers?: string[];
   invoiceIds?: string[];
@@ -21,6 +22,7 @@ async function getInvoices(
 
   const {
     page = 1,
+    pageSize = 10,
     contactIds,
     invoiceNumbers,
     invoiceIds,
@@ -43,7 +45,7 @@ async function getInvoices(
     false, // createdByMyApp
     undefined, // unitdp
     false, // summaryOnly
-    10, // pageSize
+    pageSize, // pageSize
     undefined, // searchTerm
     getClientHeaders(),
   );

@@ -50,6 +50,7 @@ const ListInvoicesTool = CreateXeroTool(
   Ask the user if they want the next page after returning 10 invoices.`,
   {
     page: z.number().optional().describe("Page number for pagination (default: 1)"),
+    pageSize: z.number().min(1).max(100).default(10).optional().describe("Number of results per page (1-100, default 10)"),
     contactIds: z
       .array(z.string())
       .optional()
@@ -85,9 +86,10 @@ const ListInvoicesTool = CreateXeroTool(
       ),
   },
   async (params) => {
-    const { page, contactIds, invoiceNumbers, invoiceIds, statuses, where, order } = params;
+    const { page, pageSize, contactIds, invoiceNumbers, invoiceIds, statuses, where, order } = params;
     const response = await listXeroInvoices({
       page,
+      pageSize,
       contactIds,
       invoiceNumbers,
       invoiceIds,
