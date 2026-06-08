@@ -7,6 +7,7 @@ import UpdateContactTool from "./update-contact.tool.js";
 import UpdateCreditNoteTool from "./update-credit-note.tool.js";
 import UpdateInvoiceTool from "./update-invoice.tool.js";
 import UpdateItemTool from "./update-item.tool.js";
+import UpdateLinkedTransactionTool from "./update-linked-transaction.tool.js";
 import AddTimesheetLineTool from "./update-payroll-timesheet-add-line.tool.js";
 import UpdatePayrollTimesheetLineTool
   from "./update-payroll-timesheet-update-line.tool.js";
@@ -30,5 +31,6 @@ export const UpdateTools = [
   UpdatePayrollTimesheetLineTool,
   RevertPayrollTimesheetTool,
   UpdateTrackingCategoryTool,
-  UpdateTrackingOptionsTool
+  UpdateTrackingOptionsTool,
+  UpdateLinkedTransactionTool
 ];
