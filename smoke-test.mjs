@@ -31,6 +31,10 @@ import { listXeroLinkedTransactions } from "./dist/handlers/list-xero-linked-tra
 import { createXeroLinkedTransaction } from "./dist/handlers/create-xero-linked-transaction.handler.js";
 import { updateXeroLinkedTransaction } from "./dist/handlers/update-xero-linked-transaction.handler.js";
 import { deleteXeroLinkedTransaction } from "./dist/handlers/delete-xero-linked-transaction.handler.js";
+import { listXeroRepeatingInvoices } from "./dist/handlers/list-xero-repeating-invoices.handler.js";
+import { getXeroRepeatingInvoice } from "./dist/handlers/get-xero-repeating-invoice.handler.js";
+import { createXeroRepeatingInvoice } from "./dist/handlers/create-xero-repeating-invoice.handler.js";
+import { deleteXeroRepeatingInvoice } from "./dist/handlers/delete-xero-repeating-invoice.handler.js";
 import { xeroClient } from "./dist/clients/xero-client.js";
 
 const results = [];
@@ -283,6 +287,47 @@ await test("linked-transaction create→update→delete (#191)", async () => {
     pass("linked-transaction create→update→delete (#191)", `link ${ltID} created, allocated to invoice ${invoiceID}, deleted, fixtures cleaned up`);
   } catch (e) {
     await voidAll();
+    throw e;
+  }
+});
+
+// ---- Repeating invoices: list (read-only) ----
+await test("list-repeating-invoices (#192)", async () => {
+  const ris = unwrap(await listXeroRepeatingInvoices());
+  pass("list-repeating-invoices (#192)", `${ris?.length ?? 0} repeating-invoice template(s)`);
+});
+
+// ---- create → get → delete: self-contained DRAFT template, fully cleaned up ----
+// A DRAFT template never generates a real invoice; delete (status=DELETED) removes it. Xero has
+// no edit for repeating invoices (POST-with-ID is delete-only), so there is no update step.
+await test("repeating-invoice create→get→delete (#192)", async () => {
+  const postable = (resp) => (resp.body.accounts ?? []).find((a) => !a.systemAccount && a.code)?.code;
+  const revCode = postable(await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="REVENUE" AND Status=="ACTIVE"'));
+  if (!revCode) throw new Error("need an ACTIVE non-system REVENUE account for fixture");
+  const contactResp = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: `ZZZ RepeatingInv Test ${Date.now()}` }] });
+  const contactID = contactResp.body.contacts?.[0]?.contactID;
+  const archiveContact = async () => {
+    try { await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] }); } catch { /* ignore */ }
+  };
+  let createdId;
+  try {
+    const created = unwrap(await createXeroRepeatingInvoice({
+      contactId: contactID,
+      schedule: { period: 1, unit: "MONTHLY", startDate: "2026-07-01", dueDate: 20, dueDateType: "OFFOLLOWINGMONTH" },
+      lineItems: [{ description: "ZZZ smoke test - delete", quantity: 1, unitAmount: 1.23, accountCode: revCode, taxType: "NONE" }],
+      type: "ACCREC", status: "DRAFT", reference: "ZZZ-SMOKE-DELETE",
+    }));
+    createdId = created.repeatingInvoiceID;
+    if (!createdId) throw new Error("create returned no repeatingInvoiceID");
+    const got = unwrap(await getXeroRepeatingInvoice(createdId));
+    if (got.repeatingInvoiceID !== createdId) throw new Error("get returned a different template");
+    const deleted = unwrap(await deleteXeroRepeatingInvoice(createdId));
+    if (deleted.status !== "DELETED") throw new Error(`expected DELETED, got ${deleted.status}`);
+    await archiveContact();
+    pass("repeating-invoice create→get→delete (#192)", `created ${createdId} (every ${got.schedule?.period} ${got.schedule?.unit}, next ${got.schedule?.nextScheduledDate}), got, deleted (${deleted.status}), contact archived`);
+  } catch (e) {
+    if (createdId) { try { await deleteXeroRepeatingInvoice(createdId); } catch { /* ignore */ } }
+    await archiveContact();
     throw e;
   }
 });

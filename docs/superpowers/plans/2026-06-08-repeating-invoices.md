@@ -1,5 +1,14 @@
 # Repeating Invoices Implementation Plan
 
+> **OUTCOME NOTE (2026-06-08): Task 4 changed during execution.** Live testing proved Xero has
+> **no edit** for repeating invoices — `updateOrCreateRepeatingInvoices` with an existing ID is
+> only valid with `status=DELETED` (else `400 ValidationException`). So Task 4's
+> `update-repeating-invoice` was replaced by **`delete-repeating-invoice`** (`delete/` dir; POST
+> id + `status=DELETED`). Shipped tool set: **list / get / create / delete**. The Task 4 content
+> below is the original (impossible) plan, retained for history; see the design-spec CORRECTION
+> banner and the `delete-xero-repeating-invoice.handler.ts` / `delete-repeating-invoice.tool.ts`
+> for what actually shipped.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add four thin-wrapper MCP tools — `list-repeating-invoices`, `get-repeating-invoice`, `create-repeating-invoice`, `update-repeating-invoice` — over the `xero-node` repeating-invoice SDK calls.

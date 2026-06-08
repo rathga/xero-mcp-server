@@ -1,10 +1,21 @@
 # Phase 4 — Repeating invoices
 
 **Date:** 2026-06-08
-**Feature:** Surface Xero repeating-invoice templates — list, get, create, and update — so
+**Feature:** Surface Xero repeating-invoice templates — list, get, create, and delete — so
 recurring sales/purchase invoices (rent, standing charges, recurring supplier bills) can be
 managed from the MCP.
 **Roadmap:** see `2026-06-07-xero-mcp-coverage-roadmap.md` (feature #4, the last queued phase).
+
+> **CORRECTION (2026-06-08, after live testing — supersedes the "update" design below).**
+> The original design proposed an `update-repeating-invoice` (full-replace) tool. Live testing
+> proved this is **impossible**: Xero's repeating-invoice API has **no edit operation**. A POST to
+> `/RepeatingInvoices` with an existing `RepeatingInvoiceID` is only valid with `status=DELETED`;
+> anything else returns `400 ValidationException: "Repeating invoice status must be set to DELETED"`.
+> So `updateOrCreateRepeatingInvoices` is, in practice, **create-or-delete**. The 4th tool shipped
+> as **`delete-repeating-invoice`** (POST id + `status=DELETED`; a minimal `{id, status}` body
+> works) instead of `update`. Editing a template = delete + recreate, left to higher-level tooling
+> per the thin-wrapper rule. Shipped tool set: **list / get / create / delete**. Where the text
+> below says "update", read "delete".
 
 ## Goal
 
@@ -26,9 +37,10 @@ SDK methods (all on `accountingApi`):
 - `createRepeatingInvoices(tenantId, repeatingInvoices: RepeatingInvoices, summarizeErrors?, idempotencyKey?, options?)`
   — takes the **plural** `RepeatingInvoices` wrapper (`{ repeatingInvoices: [...] }`)
 - `updateOrCreateRepeatingInvoices(tenantId, repeatingInvoices: RepeatingInvoices, summarizeErrors?, idempotencyKey?, options?)`
-  — the **only** update path. It is a **POST-with-ID**: set `repeatingInvoiceID` in the body and it
-  updates that template (full replace, not a patch). There is **no** `deleteRepeatingInvoice`
-  method — "delete" is done by POSTing `status="DELETED"` through this same call.
+  — a **POST-with-ID**: set `repeatingInvoiceID` in the body. **In practice this is delete-only** —
+  see the CORRECTION banner above. The only valid POST-with-ID is `status="DELETED"`; Xero rejects
+  edits with `400 ValidationException`. There is no `deleteRepeatingInvoice` method, so this call
+  *is* the delete path.
 
 `RepeatingInvoice` model fields used:
 
@@ -64,7 +76,7 @@ sits naturally alongside `list-repeating-invoices` with no naming collision.
 | `list-repeating-invoices` | `list/` | `getRepeatingInvoices` | find templates; raw `where`/`order` filters |
 | `get-repeating-invoice` | `get/` | `getRepeatingInvoice` | full template incl. line items (read before an update) |
 | `create-repeating-invoice` | `create/` | `createRepeatingInvoices` | new template |
-| `update-repeating-invoice` | `update/` | `updateOrCreateRepeatingInvoices` | full-replace; also the "delete" path via `status="DELETED"` |
+| `delete-repeating-invoice` | `delete/` | `updateOrCreateRepeatingInvoices` (POST id + `status=DELETED`) | delete a template (no edit exists — see CORRECTION) |
 
 The repo already has `create/`, `get/`, `list/`, `update/` tool categories, each with its own
 `index.ts` aggregated by `tool-factory.ts`. No factory restructuring needed.
