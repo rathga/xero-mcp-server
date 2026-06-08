@@ -27,6 +27,10 @@ import { listXeroPrepayments } from "./dist/handlers/list-xero-prepayments.handl
 import { createXeroCreditNoteAllocation } from "./dist/handlers/create-xero-credit-note-allocation.handler.js";
 import { createXeroOverpaymentAllocation } from "./dist/handlers/create-xero-overpayment-allocation.handler.js";
 import { createXeroPrepaymentAllocation } from "./dist/handlers/create-xero-prepayment-allocation.handler.js";
+import { listXeroLinkedTransactions } from "./dist/handlers/list-xero-linked-transactions.handler.js";
+import { createXeroLinkedTransaction } from "./dist/handlers/create-xero-linked-transaction.handler.js";
+import { updateXeroLinkedTransaction } from "./dist/handlers/update-xero-linked-transaction.handler.js";
+import { deleteXeroLinkedTransaction } from "./dist/handlers/delete-xero-linked-transaction.handler.js";
 import { xeroClient } from "./dist/clients/xero-client.js";
 
 const results = [];
@@ -224,6 +228,63 @@ await test("create-prepayment-allocation (#187)", async () => {
   const allocationID = applied[0]?.allocationID;
   if (allocationID) await xeroClient.accountingApi.deletePrepaymentAllocations(xeroClient.tenantId, ppWithBalance.prepaymentID, allocationID);
   pass("create-prepayment-allocation (#187)", `applied ${amt} then deleted allocation ${allocationID}`);
+});
+
+// ---- Linked transactions: list tool (read-only) ----
+await test("list-linked-transactions (#191)", async () => {
+  const lts = unwrap(await listXeroLinkedTransactions(1));
+  pass("list-linked-transactions (#191)", `${lts?.length ?? 0} linked transaction(s)`);
+});
+
+// ---- create → update → delete: self-contained fixtures, fully cleaned up ----
+await test("linked-transaction create→update→delete (#191)", async () => {
+  const today = new Date().toISOString().split("T")[0];
+  // Account codes for the fixture lines: one expense (the bill), one revenue (the sales invoice).
+  // Must be ACTIVE and non-system — the first account a Class filter returns can be an archived
+  // system account (e.g. "Bank Revaluations"), which Xero rejects as a line account code.
+  const postable = (resp) => (resp.body.accounts ?? []).find((a) => !a.systemAccount && a.code)?.code;
+  const expCode = postable(await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="EXPENSE" AND Status=="ACTIVE"'));
+  const revCode = postable(await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="REVENUE" AND Status=="ACTIVE"'));
+  if (!expCode || !revCode) throw new Error("need an ACTIVE non-system EXPENSE and REVENUE account for fixtures");
+  // One throwaway contact serving as both the bill supplier and the recharge customer.
+  const contactResp = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: `ZZZ LinkedTx Test ${Date.now()}` }] });
+  const contactID = contactResp.body.contacts?.[0]?.contactID;
+  // AUTHORISED ACCPAY bill (the source cost), one line.
+  const billResp = await xeroClient.accountingApi.createInvoices(xeroClient.tenantId, { invoices: [{
+    type: "ACCPAY", contact: { contactID }, date: today, dueDate: today, status: "AUTHORISED",
+    lineAmountTypes: "NoTax", lineItems: [{ description: "smoke test cost", quantity: 1, unitAmount: 50, accountCode: expCode }],
+  }] });
+  const billID = billResp.body.invoices?.[0]?.invoiceID;
+  const sourceLineItemID = billResp.body.invoices?.[0]?.lineItems?.[0]?.lineItemID;
+  // AUTHORISED ACCREC sales invoice (the target to recharge onto), one line.
+  const invResp = await xeroClient.accountingApi.createInvoices(xeroClient.tenantId, { invoices: [{
+    type: "ACCREC", contact: { contactID }, date: today, dueDate: today, status: "AUTHORISED",
+    lineAmountTypes: "NoTax", lineItems: [{ description: "smoke test recharge", quantity: 1, unitAmount: 50, accountCode: revCode }],
+  }] });
+  const invoiceID = invResp.body.invoices?.[0]?.invoiceID;
+  const targetLineItemID = invResp.body.invoices?.[0]?.lineItems?.[0]?.lineItemID;
+  const voidAll = async () => {
+    try { await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, billID, { invoices: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    try { await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, invoiceID, { invoices: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    try { await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] }); } catch { /* ignore */ }
+  };
+  try {
+    if (!sourceLineItemID || !targetLineItemID) throw new Error("fixture line item IDs not returned");
+    // Stage 1: mark the bill line billable to the customer.
+    const created = unwrap(await createXeroLinkedTransaction(billID, sourceLineItemID, contactID));
+    const ltID = created.linkedTransactionID;
+    if (!ltID) throw new Error("create returned no linkedTransactionID");
+    // Stage 2: allocate onto the sales-invoice line.
+    const updated = unwrap(await updateXeroLinkedTransaction(ltID, invoiceID, targetLineItemID));
+    if (updated.targetTransactionID !== invoiceID) throw new Error(`target not applied: ${updated.targetTransactionID}`);
+    // Cleanup: delete the link, then void both fixtures + archive the contact.
+    unwrap(await deleteXeroLinkedTransaction(ltID));
+    await voidAll();
+    pass("linked-transaction create→update→delete (#191)", `link ${ltID} created, allocated to invoice ${invoiceID}, deleted, fixtures cleaned up`);
+  } catch (e) {
+    await voidAll();
+    throw e;
+  }
 });
 
 // ---- cleanup safety net ----
