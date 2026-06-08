@@ -62,7 +62,7 @@ export interface CreateRepeatingInvoiceInput {
   includePDF?: boolean;
 }
 
-export function buildSchedule(input: RepeatingInvoiceScheduleInput): Schedule {
+function buildSchedule(input: RepeatingInvoiceScheduleInput): Schedule {
   return {
     period: input.period,
     unit: Schedule.UnitEnum[input.unit as keyof typeof Schedule.UnitEnum],
@@ -77,11 +77,10 @@ export function buildSchedule(input: RepeatingInvoiceScheduleInput): Schedule {
   };
 }
 
-export function buildRepeatingInvoice(
-  input: CreateRepeatingInvoiceInput & { repeatingInvoiceId?: string },
+function buildRepeatingInvoice(
+  input: CreateRepeatingInvoiceInput,
 ): RepeatingInvoice {
   return {
-    repeatingInvoiceID: input.repeatingInvoiceId,
     type:
       RepeatingInvoice.TypeEnum[
         (input.type ?? "ACCREC") as keyof typeof RepeatingInvoice.TypeEnum
