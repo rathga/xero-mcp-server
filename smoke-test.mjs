@@ -25,6 +25,9 @@ import { archiveXeroAccount } from "./dist/handlers/archive-xero-account.handler
 import { listXeroOverpayments } from "./dist/handlers/list-xero-overpayments.handler.js";
 import { listXeroPrepayments } from "./dist/handlers/list-xero-prepayments.handler.js";
 import { createXeroCreditNoteAllocation } from "./dist/handlers/create-xero-credit-note-allocation.handler.js";
+import { deleteXeroCreditNoteAllocation } from "./dist/handlers/delete-xero-credit-note-allocation.handler.js";
+import { listXeroCreditNotes } from "./dist/handlers/list-xero-credit-notes.handler.js";
+import { updateXeroCreditNote } from "./dist/handlers/update-xero-credit-note.handler.js";
 import { createXeroOverpaymentAllocation } from "./dist/handlers/create-xero-overpayment-allocation.handler.js";
 import { createXeroPrepaymentAllocation } from "./dist/handlers/create-xero-prepayment-allocation.handler.js";
 import { listXeroLinkedTransactions } from "./dist/handlers/list-xero-linked-transactions.handler.js";
@@ -328,6 +331,76 @@ await test("repeating-invoice create→get→delete (#192)", async () => {
   } catch (e) {
     if (createdId) { try { await deleteXeroRepeatingInvoice(createdId); } catch { /* ignore */ } }
     await archiveContact();
+    throw e;
+  }
+});
+
+// ---- credit-note de-allocation + authorised-CN edit: self-contained fixture, fully cleaned up ----
+// Verifies: allocations (with allocationID) appear in list-credit-notes; whether Xero permits a
+// date edit while a CN is still allocated (open question in the spec); delete-credit-note-allocation
+// frees the credit; date edit succeeds on the AUTHORISED CN afterwards; line-item edits on an
+// AUTHORISED CN are rejected by the handler guard.
+await test("credit-note de-allocate + edit authorised CN", async () => {
+  const today = new Date().toISOString().split("T")[0];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split("T")[0];
+  const postable = (resp) => (resp.body.accounts ?? []).find((a) => !a.systemAccount && a.code)?.code;
+  const revCode = postable(await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="REVENUE" AND Status=="ACTIVE"'));
+  if (!revCode) throw new Error("need an ACTIVE non-system REVENUE account for fixture");
+  const contactResp = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: `ZZZ Dealloc Test ${Date.now()}` }] });
+  const contactID = contactResp.body.contacts?.[0]?.contactID;
+  const invResp = await xeroClient.accountingApi.createInvoices(xeroClient.tenantId, { invoices: [{
+    type: "ACCREC", contact: { contactID }, date: today, dueDate: today, status: "AUTHORISED",
+    lineAmountTypes: "NoTax", lineItems: [{ description: "smoke test", quantity: 1, unitAmount: 100, accountCode: revCode }],
+  }] });
+  const invoiceID = invResp.body.invoices?.[0]?.invoiceID;
+  const cnResp = await xeroClient.accountingApi.createCreditNotes(xeroClient.tenantId, { creditNotes: [{
+    type: "ACCRECCREDIT", contact: { contactID }, date: today, status: "AUTHORISED",
+    lineAmountTypes: "NoTax", lineItems: [{ description: "smoke test", quantity: 1, unitAmount: 100, accountCode: revCode }],
+  }] });
+  const creditNoteID = cnResp.body.creditNotes?.[0]?.creditNoteID;
+  const cleanup = async () => {
+    try { await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, invoiceID, { invoices: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    try { await xeroClient.accountingApi.updateCreditNote(xeroClient.tenantId, creditNoteID, { creditNotes: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    try { await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] }); } catch { /* ignore */ }
+  };
+  try {
+    // Allocate the full credit to the invoice.
+    const applied = unwrap(await createXeroCreditNoteAllocation(creditNoteID, [{ invoiceId: invoiceID, amount: 100, date: today }]));
+    if (!applied.length) throw new Error("allocation not created");
+
+    // The allocation (with its ID) must be discoverable via list-credit-notes.
+    const listed = unwrap(await listXeroCreditNotes(1, contactID, 10));
+    const listedCN = (listed ?? []).find((cn) => cn.creditNoteID === creditNoteID);
+    const listedAlloc = listedCN?.allocations?.[0];
+    if (!listedAlloc?.allocationID) throw new Error(`list-credit-notes did not surface allocationID (allocations=${JSON.stringify(listedCN?.allocations)})`);
+
+    // Open question from the spec: does Xero accept a date edit while still allocated?
+    const editWhileAllocated = await updateXeroCreditNote(creditNoteID, undefined, undefined, undefined, yesterday);
+    const whileAllocatedOutcome = editWhileAllocated.isError
+      ? `REJECTED (${String(editWhileAllocated.error).slice(0, 80)})`
+      : `ACCEPTED (date now ${editWhileAllocated.result?.date})`;
+
+    // De-allocate via the new handler; credit must return to the CN.
+    unwrap(await deleteXeroCreditNoteAllocation(creditNoteID, listedAlloc.allocationID));
+    const after = unwrap(await listXeroCreditNotes(1, contactID, 10));
+    const afterCN = (after ?? []).find((cn) => cn.creditNoteID === creditNoteID);
+    if ((afterCN?.allocations?.length ?? 0) !== 0) throw new Error("allocation still present after delete");
+    if ((afterCN?.remainingCredit ?? 0) !== 100) throw new Error(`remainingCredit expected 100, got ${afterCN?.remainingCredit}`);
+
+    // Date edit on the AUTHORISED (now unallocated) CN must succeed.
+    // The SDK returns `date` as a JS Date — normalise to yyyy-mm-dd before comparing.
+    const reDated = unwrap(await updateXeroCreditNote(creditNoteID, undefined, undefined, undefined, yesterday));
+    const reDatedDay = new Date(reDated.date).toISOString().split("T")[0];
+    if (reDatedDay !== yesterday) throw new Error(`date not updated: ${reDated.date}`);
+
+    // Guard: line-item edits on an AUTHORISED CN must be rejected by the handler.
+    const guarded = await updateXeroCreditNote(creditNoteID, [{ description: "x", quantity: 1, unitAmount: 1, accountCode: revCode, taxType: "NONE" }]);
+    if (!guarded.isError) throw new Error("handler allowed line-item edit on AUTHORISED credit note");
+
+    await cleanup();
+    pass("credit-note de-allocate + edit authorised CN", `alloc ${listedAlloc.allocationID} listed+deleted; edit-while-allocated: ${whileAllocatedOutcome}; re-date after de-alloc OK (${reDated.date}); line-item guard OK; cleaned up`);
+  } catch (e) {
+    await cleanup();
     throw e;
   }
 });
