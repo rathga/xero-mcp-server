@@ -34,6 +34,7 @@ import { listXeroLinkedTransactions } from "./dist/handlers/list-xero-linked-tra
 import { createXeroLinkedTransaction } from "./dist/handlers/create-xero-linked-transaction.handler.js";
 import { updateXeroLinkedTransaction } from "./dist/handlers/update-xero-linked-transaction.handler.js";
 import { deleteXeroLinkedTransaction } from "./dist/handlers/delete-xero-linked-transaction.handler.js";
+import ListInvoicesTool from "./dist/tools/list/list-invoices.tool.js";
 import { listXeroRepeatingInvoices } from "./dist/handlers/list-xero-repeating-invoices.handler.js";
 import { getXeroRepeatingInvoice } from "./dist/handlers/get-xero-repeating-invoice.handler.js";
 import { createXeroRepeatingInvoice } from "./dist/handlers/create-xero-repeating-invoice.handler.js";
@@ -399,6 +400,56 @@ await test("credit-note de-allocate + edit authorised CN", async () => {
 
     await cleanup();
     pass("credit-note de-allocate + edit authorised CN", `alloc ${listedAlloc.allocationID} listed+deleted; edit-while-allocated: ${whileAllocatedOutcome}; re-date after de-alloc OK (${reDated.date}); line-item guard OK; cleaned up`);
+  } catch (e) {
+    await cleanup();
+    throw e;
+  }
+});
+
+// ---- list-invoices surfaces Line Item IDs for invoiceIds fetches ----
+// The gate that prints line items used to trigger only for invoiceNumbers. Email-imported
+// bills often have no InvoiceNumber, so their line-item IDs were unreadable — blocking
+// create-linked-transaction (which needs sourceLineItemId). The fix extends the gate to
+// invoiceIds. Proven on the SAME numberless bill: line items appear when fetched by
+// invoiceIds, but not by contactIds (an unrelated filter), so it's the gate, not the data.
+await test("list-invoices returns Line Item IDs for invoiceIds (numberless bill)", async () => {
+  await xeroClient.authenticate();
+  const today = new Date().toISOString().split("T")[0];
+  const postable = (resp) => (resp.body.accounts ?? []).find((a) => !a.systemAccount && a.code)?.code;
+  const expCode = postable(await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="EXPENSE" AND Status=="ACTIVE"'));
+  if (!expCode) throw new Error("need an ACTIVE non-system EXPENSE account for fixture");
+  const contactResp = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: `ZZZ ListInvLineId Test ${Date.now()}` }] });
+  const contactID = contactResp.body.contacts?.[0]?.contactID;
+  // AUTHORISED ACCPAY bill with NO invoiceNumber — the case that used to be unreadable.
+  const billResp = await xeroClient.accountingApi.createInvoices(xeroClient.tenantId, { invoices: [{
+    type: "ACCPAY", contact: { contactID }, date: today, dueDate: today, status: "AUTHORISED",
+    lineAmountTypes: "NoTax", lineItems: [{ description: "smoke test cost", quantity: 1, unitAmount: 50, accountCode: expCode }],
+  }] });
+  const billID = billResp.body.invoices?.[0]?.invoiceID;
+  const lineItemID = billResp.body.invoices?.[0]?.lineItems?.[0]?.lineItemID;
+  const invoiceNumber = billResp.body.invoices?.[0]?.invoiceNumber;
+  const cleanup = async () => {
+    try { await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, billID, { invoices: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    try { await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] }); } catch { /* ignore */ }
+  };
+  const callTool = async (params) => {
+    const res = await ListInvoicesTool().handler(params);
+    return (res.content ?? []).map((c) => c.text).join("\n");
+  };
+  try {
+    if (!lineItemID) throw new Error("fixture line item ID not returned");
+    if (invoiceNumber) throw new Error(`fixture bill unexpectedly got an invoiceNumber (${invoiceNumber}) — Xero auto-numbered it; test premise broken`);
+    const byIds = await callTool({ invoiceIds: [billID] });
+    if (!byIds.includes("Line Items:") || !byIds.includes(`Line Item ID: ${lineItemID}`)) {
+      throw new Error(`invoiceIds fetch did not surface Line Item ID ${lineItemID}`);
+    }
+    // Same bill via an unrelated filter (contactIds) must still NOT print line items.
+    const byContact = await callTool({ contactIds: [contactID] });
+    if (byContact.includes("Line Item ID:")) {
+      throw new Error("contactIds fetch leaked line items — gate too broad");
+    }
+    await cleanup();
+    pass("list-invoices returns Line Item IDs for invoiceIds (numberless bill)", `numberless bill ${billID}: invoiceIds surfaced Line Item ID ${lineItemID}; contactIds did not`);
   } catch (e) {
     await cleanup();
     throw e;
