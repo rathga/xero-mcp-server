@@ -62,7 +62,7 @@ const ListInvoicesTool = CreateXeroTool(
     invoiceIds: z
       .array(z.string())
       .optional()
-      .describe("Filter by invoice IDs (comma-separated list for optimal performance)"),
+      .describe("Filter by invoice IDs (comma-separated list for optimal performance). When provided, line items (including each line's Line Item ID) will also be returned"),
     statuses: z
       .array(z.string())
       .optional()
@@ -110,7 +110,8 @@ const ListInvoicesTool = CreateXeroTool(
     }
 
     const invoices = response.result;
-    const returnLineItems = (invoiceNumbers?.length ?? 0) > 0;
+    const returnLineItems =
+      (invoiceNumbers?.length ?? 0) > 0 || (invoiceIds?.length ?? 0) > 0;
 
     return {
       content: [
