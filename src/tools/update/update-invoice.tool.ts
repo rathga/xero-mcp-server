@@ -27,7 +27,8 @@ const lineItemSchema = z.object({
 
 const UpdateInvoiceTool = CreateXeroTool(
   "update-invoice",
-  "Update an invoice in Xero. Only works on draft invoices.\
+  "Update an invoice in Xero. Draft invoices can be fully updated. \
+  Authorised invoices only accept changes to their date, due date, reference and status.\
   All line items must be provided. Any line items not provided will be removed. Including existing line items.\
   Do not modify line items that have not been specified by the user.\
  When an invoice is updated, a deep link to the invoice in Xero is returned. \
@@ -44,6 +45,11 @@ const UpdateInvoiceTool = CreateXeroTool(
     date: z.string().optional().describe("The date of the invoice."),
     contactId: z.string().optional().describe("The ID of the contact to update the invoice for. \
       Can be obtained from the list-contacts tool."),
+    status: z.enum(["DRAFT", "SUBMITTED", "AUTHORISED", "DELETED", "VOIDED"]).optional().describe(
+      "The status to set on the invoice. AUTHORISED approves a draft invoice, DELETED removes a \
+      draft invoice, and VOIDED cancels an authorised invoice that has no payments, credit notes \
+      or prepayments applied. Omit to leave the status unchanged.",
+    ),
   },
   async (
     {
@@ -53,21 +59,8 @@ const UpdateInvoiceTool = CreateXeroTool(
       dueDate,
       date,
       contactId,
-    }: {
-      invoiceId: string;
-      lineItems?: Array<{
-        description: string;
-        quantity: number;
-        unitAmount: number;
-        accountCode: string;
-        taxType: string;
-      }>;
-      reference?: string;
-      dueDate?: string;
-      date?: string;
-      contactId?: string;
+      status,
     },
-    //_extra: { signal: AbortSignal },
   ) => {
     const result = await updateXeroInvoice(
       invoiceId,
@@ -76,6 +69,7 @@ const UpdateInvoiceTool = CreateXeroTool(
       dueDate,
       date,
       contactId,
+      status as Invoice.StatusEnum | undefined,
     );
     if (result.isError) {
       return {

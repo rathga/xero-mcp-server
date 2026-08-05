@@ -35,6 +35,7 @@ async function updateInvoice(
   dueDate?: string,
   date?: string,
   contactId?: string,
+  status?: Invoice.StatusEnum,
 ): Promise<Invoice | undefined> {
   const invoice: Invoice = {
     lineItems: lineItems,
@@ -42,6 +43,7 @@ async function updateInvoice(
     dueDate: dueDate,
     date: date,
     contact: contactId ? { contactID: contactId } : undefined,
+    status: status,
   };
 
   const response = await xeroClient.accountingApi.updateInvoice(
@@ -68,18 +70,28 @@ export async function updateXeroInvoice(
   dueDate?: string,
   date?: string,
   contactId?: string,
+  status?: Invoice.StatusEnum,
 ): Promise<XeroClientResponse<Invoice>> {
   try {
     const existingInvoice = await getInvoice(invoiceId);
 
     const invoiceStatus = existingInvoice?.status;
 
-    // Only allow updates to DRAFT invoices
-    if (invoiceStatus !== Invoice.StatusEnum.DRAFT) {
+    if (invoiceStatus === Invoice.StatusEnum.AUTHORISED) {
+      if (lineItems || contactId) {
+        return {
+          result: null,
+          isError: true,
+          error:
+            "Only the date, due date, reference and status of an authorised invoice can be updated. " +
+            "Line items and contact cannot be changed.",
+        };
+      }
+    } else if (invoiceStatus !== Invoice.StatusEnum.DRAFT) {
       return {
         result: null,
         isError: true,
-        error: `Cannot update invoice because it is not a draft. Current status: ${invoiceStatus}`,
+        error: `Cannot update invoice because its status is ${invoiceStatus}. Only draft invoices can be fully updated; authorised invoices can have their date, due date, reference and status updated.`,
       };
     }
 
@@ -90,6 +102,7 @@ export async function updateXeroInvoice(
       dueDate,
       date,
       contactId,
+      status,
     );
 
     if (!updatedInvoice) {
