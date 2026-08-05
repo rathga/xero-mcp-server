@@ -27,10 +27,10 @@ const lineItemSchema = z.object({
 
 const UpdateInvoiceTool = CreateXeroTool(
   "update-invoice",
-  "Update an invoice in Xero. Draft invoices can be fully updated. \
-  Authorised invoices only accept changes to their date, due date, reference and status.\
-  All line items must be provided. Any line items not provided will be removed. Including existing line items.\
+  "Update an invoice in Xero. Draft and submitted invoices can be fully updated:\
+  all line items must be provided. Any line items not provided will be removed. Including existing line items.\
   Do not modify line items that have not been specified by the user.\
+  Authorised invoices only accept changes to their date, due date, reference and status.\
  When an invoice is updated, a deep link to the invoice in Xero is returned. \
  This deep link can be used to view the contact in Xero directly. \
  This link should be displayed to the user.",
@@ -46,9 +46,11 @@ const UpdateInvoiceTool = CreateXeroTool(
     contactId: z.string().optional().describe("The ID of the contact to update the invoice for. \
       Can be obtained from the list-contacts tool."),
     status: z.enum(["DRAFT", "SUBMITTED", "AUTHORISED", "DELETED", "VOIDED"]).optional().describe(
-      "The status to set on the invoice. AUTHORISED approves a draft invoice, DELETED removes a \
-      draft invoice, and VOIDED cancels an authorised invoice that has no payments, credit notes \
-      or prepayments applied. Omit to leave the status unchanged.",
+      "The status to set on the invoice. SUBMITTED submits a draft invoice for approval, DRAFT \
+      returns a submitted invoice to draft, AUTHORISED approves a draft or submitted invoice, \
+      DELETED removes a draft or submitted invoice, and VOIDED cancels an authorised invoice that \
+      has no payments, credit notes or prepayments applied. Omit to leave the status unchanged. \
+      Xero ignores every other field sent alongside DELETED or VOIDED, so send those on their own.",
     ),
   },
   async (

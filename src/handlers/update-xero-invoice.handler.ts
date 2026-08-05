@@ -87,11 +87,14 @@ export async function updateXeroInvoice(
             "Line items and contact cannot be changed.",
         };
       }
-    } else if (invoiceStatus !== Invoice.StatusEnum.DRAFT) {
+    } else if (
+      invoiceStatus !== Invoice.StatusEnum.DRAFT &&
+      invoiceStatus !== Invoice.StatusEnum.SUBMITTED
+    ) {
       return {
         result: null,
         isError: true,
-        error: `Cannot update invoice because its status is ${invoiceStatus}. Only draft invoices can be fully updated; authorised invoices can have their date, due date, reference and status updated.`,
+        error: `Cannot update invoice because its status is ${invoiceStatus}. Only draft and submitted invoices can be fully updated; authorised invoices can have their date, due date, reference and status updated.`,
       };
     }
 
