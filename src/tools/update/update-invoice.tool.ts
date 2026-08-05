@@ -27,10 +27,10 @@ const lineItemSchema = z.object({
 
 const UpdateInvoiceTool = CreateXeroTool(
   "update-invoice",
-  "Update an invoice in Xero. Draft and submitted invoices can be fully updated:\
+  "Update an invoice in Xero. Draft, submitted and authorised invoices can be updated:\
   all line items must be provided. Any line items not provided will be removed. Including existing line items.\
   Do not modify line items that have not been specified by the user.\
-  Authorised invoices only accept changes to their date, due date, reference and status.\
+  An authorised invoice can only be updated while it has no payments, credit notes, prepayments or overpayments applied.\
  When an invoice is updated, a deep link to the invoice in Xero is returned. \
  This deep link can be used to view the contact in Xero directly. \
  This link should be displayed to the user.",
@@ -49,7 +49,7 @@ const UpdateInvoiceTool = CreateXeroTool(
       "The status to set on the invoice. SUBMITTED submits a draft invoice for approval, DRAFT \
       returns a submitted invoice to draft, AUTHORISED approves a draft or submitted invoice, \
       DELETED removes a draft or submitted invoice, and VOIDED cancels an authorised invoice that \
-      has no payments, credit notes or prepayments applied. Omit to leave the status unchanged. \
+      has no payments, credit notes, prepayments or overpayments applied. Omit to leave the status unchanged. \
       Xero ignores every other field sent alongside DELETED or VOIDED, so send those on their own.",
     ),
   },

@@ -60,6 +60,36 @@ async function updateInvoice(
   return response.body.invoices?.[0];
 }
 
+function paymentsAndAllocationsOn(invoice: Invoice | undefined): string[] {
+  return [
+    invoice?.payments?.length ? "payments" : null,
+    invoice?.creditNotes?.length ? "credit notes" : null,
+    invoice?.prepayments?.length ? "prepayments" : null,
+    invoice?.overpayments?.length ? "overpayments" : null,
+  ].filter((applied) => applied !== null);
+}
+
+function updateRejectionReason(invoice: Invoice | undefined): string | undefined {
+  const status = invoice?.status;
+
+  const isUpdatableStatus =
+    status === Invoice.StatusEnum.DRAFT ||
+    status === Invoice.StatusEnum.SUBMITTED ||
+    status === Invoice.StatusEnum.AUTHORISED;
+
+  if (!isUpdatableStatus) {
+    return `Cannot update invoice because its status is ${status}. Only draft, submitted and authorised invoices can be updated.`;
+  }
+
+  const applied = paymentsAndAllocationsOn(invoice);
+
+  if (applied.length > 0) {
+    return `Cannot update invoice because it has ${applied.join(" and ")} applied to it. Remove them before updating the invoice.`;
+  }
+
+  return undefined;
+}
+
 /**
  * Update an existing invoice in Xero
  */
@@ -75,26 +105,13 @@ export async function updateXeroInvoice(
   try {
     const existingInvoice = await getInvoice(invoiceId);
 
-    const invoiceStatus = existingInvoice?.status;
+    const rejectionReason = updateRejectionReason(existingInvoice);
 
-    if (invoiceStatus === Invoice.StatusEnum.AUTHORISED) {
-      if (lineItems || contactId) {
-        return {
-          result: null,
-          isError: true,
-          error:
-            "Only the date, due date, reference and status of an authorised invoice can be updated. " +
-            "Line items and contact cannot be changed.",
-        };
-      }
-    } else if (
-      invoiceStatus !== Invoice.StatusEnum.DRAFT &&
-      invoiceStatus !== Invoice.StatusEnum.SUBMITTED
-    ) {
+    if (rejectionReason) {
       return {
         result: null,
         isError: true,
-        error: `Cannot update invoice because its status is ${invoiceStatus}. Only draft and submitted invoices can be fully updated; authorised invoices can have their date, due date, reference and status updated.`,
+        error: rejectionReason,
       };
     }
 
