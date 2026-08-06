@@ -12,7 +12,7 @@
 // build that was loaded at Claude-Code startup — stale until the client restarts.
 // Add a test block here for every new feature PR before calling it verified.
 
-import { AccountType } from "xero-node";
+import { AccountType, Invoice } from "xero-node";
 import { listXeroTrackingCategories } from "./dist/handlers/list-xero-tracking-categories.handler.js";
 import { listXeroProfitAndLoss } from "./dist/handlers/list-xero-profit-and-loss.handler.js";
 import { listXeroInvoices } from "./dist/handlers/list-xero-invoices.handler.js";
@@ -35,6 +35,7 @@ import { createXeroLinkedTransaction } from "./dist/handlers/create-xero-linked-
 import { updateXeroLinkedTransaction } from "./dist/handlers/update-xero-linked-transaction.handler.js";
 import { deleteXeroLinkedTransaction } from "./dist/handlers/delete-xero-linked-transaction.handler.js";
 import ListInvoicesTool from "./dist/tools/list/list-invoices.tool.js";
+import { updateXeroInvoice } from "./dist/handlers/update-xero-invoice.handler.js";
 import { listXeroRepeatingInvoices } from "./dist/handlers/list-xero-repeating-invoices.handler.js";
 import { getXeroRepeatingInvoice } from "./dist/handlers/get-xero-repeating-invoice.handler.js";
 import { createXeroRepeatingInvoice } from "./dist/handlers/create-xero-repeating-invoice.handler.js";
@@ -46,7 +47,14 @@ const pass = (name, evidence) => { results.push({ name, ok: true, evidence }); c
 const fail = (name, evidence) => { results.push({ name, ok: false, evidence }); console.log(`  FAIL  ${name} — ${evidence}`); };
 const unwrap = (r) => { if (r.isError) throw new Error(r.error); return r.result; };
 
+// The tenant is shared production on a 5,000 call/day cap, and a whole-suite run costs ~85
+// calls. Set SMOKE_ONLY to a substring of a block name to run just that block while iterating
+// on it; leave it unset for the full suite (the only run whose x/y total means anything).
+const only = process.env.SMOKE_ONLY;
+if (only) console.log(`\n⚠ SMOKE_ONLY="${only}" — running matching blocks only; the summary is NOT a full-suite result`);
+
 async function test(name, fn) {
+  if (only && !name.toLowerCase().includes(only.toLowerCase())) return;
   console.log(`\n▶ ${name}`);
   try { await fn(); } catch (e) { fail(name, `threw: ${e.message}`); }
 }
@@ -450,6 +458,96 @@ await test("list-invoices returns Line Item IDs for invoiceIds (numberless bill)
     }
     await cleanup();
     pass("list-invoices returns Line Item IDs for invoiceIds (numberless bill)", `numberless bill ${billID}: invoiceIds surfaced Line Item ID ${lineItemID}; contactIds did not`);
+  } catch (e) {
+    await cleanup();
+    throw e;
+  }
+});
+
+// ---- update-invoice can set an invoice's status (PR #221) ----
+// The handler used to reject anything that wasn't DRAFT. Now DRAFT, SUBMITTED and AUTHORISED are
+// all updatable and `status` is settable, so approval (DRAFT→AUTHORISED) and disposal (DELETED
+// for a draft, VOIDED for an authorised invoice) go through update-invoice instead of needing the
+// Xero UI. An invoice carrying payments, credit notes, prepayments or overpayments is still
+// refused, with the applied entity named in the reason — proved here with a *partial* credit-note
+// allocation, which leaves the invoice AUTHORISED so the refusal can only come from the
+// applied-entity guard and not from the status guard. Three fixture invoices are created in one
+// batch call; each is disposed of by the block (two by the assertions themselves).
+//
+// Live result (2026-08-06, run in isolation via SMOKE_ONLY — the tenant's daily allowance was
+// already down to 486/5000 before this run, so the full suite was deliberately not re-run):
+// PASS. INV-6470 DRAFT→AUTHORISED→VOIDED, INV-6471 DRAFT→DELETED, INV-6472 (40 of 100 credited)
+// refused with "Cannot update invoice because it has credit notes applied to it." Read-back
+// confirmed every fixture disposed: both voided invoices VOIDED, the draft DELETED, CN-6473
+// VOIDED with its 40 credit returned, contact ARCHIVED. Cost 16 API calls.
+// Note Xero returns the credit-carrying invoice's own status as AUTHORISED throughout — the
+// refusal is the handler's guard, not Xero's, so it costs one GET and no write.
+await test("update-invoice sets status: approve, void, delete, refuse (PR #221)", async () => {
+  await xeroClient.authenticate();
+  const today = new Date().toISOString().split("T")[0];
+  const postable = (resp) => (resp.body.accounts ?? []).find((a) => !a.systemAccount && a.code)?.code;
+  const revCode = postable(await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="REVENUE" AND Status=="ACTIVE"'));
+  if (!revCode) throw new Error("need an ACTIVE non-system REVENUE account for fixture");
+  const contactResp = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: `ZZZ InvoiceStatus Test ${Date.now()}` }] });
+  const contactID = contactResp.body.contacts?.[0]?.contactID;
+  const invoiceOf = (amount, status) => ({
+    type: "ACCREC", contact: { contactID }, date: today, dueDate: today, status,
+    lineAmountTypes: "NoTax",
+    lineItems: [{ description: "ZZZ smoke test - delete", quantity: 1, unitAmount: amount, accountCode: revCode }],
+  });
+  // One batch call for all three fixtures — two drafts (one to approve then void, one to delete)
+  // and one authorised invoice to carry the credit note. Matched back by total, not by position.
+  const invResp = await xeroClient.accountingApi.createInvoices(xeroClient.tenantId, { invoices: [
+    invoiceOf(10, "DRAFT"), invoiceOf(20, "DRAFT"), invoiceOf(100, "AUTHORISED"),
+  ] });
+  const byTotal = (total) => (invResp.body.invoices ?? []).find((i) => i.total === total);
+  const toApprove = byTotal(10), toDelete = byTotal(20), withCredit = byTotal(100);
+  if (!toApprove?.invoiceID || !toDelete?.invoiceID || !withCredit?.invoiceID) throw new Error("fixture invoices not returned");
+  const cnResp = await xeroClient.accountingApi.createCreditNotes(xeroClient.tenantId, { creditNotes: [{
+    type: "ACCRECCREDIT", contact: { contactID }, date: today, status: "AUTHORISED",
+    lineAmountTypes: "NoTax", lineItems: [{ description: "ZZZ smoke test - delete", quantity: 1, unitAmount: 40, accountCode: revCode }],
+  }] });
+  const creditNoteID = cnResp.body.creditNotes?.[0]?.creditNoteID;
+  // Only what the assertions have not already disposed of gets voided at the end.
+  const liveInvoices = new Set([toApprove.invoiceID, toDelete.invoiceID, withCredit.invoiceID]);
+  let allocationID;
+  const cleanup = async () => {
+    // The credit has to come off before Xero will let its invoice be voided.
+    if (allocationID) { try { await xeroClient.accountingApi.deleteCreditNoteAllocations(xeroClient.tenantId, creditNoteID, allocationID); } catch { /* ignore */ } }
+    for (const invoiceID of liveInvoices) {
+      try { await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, invoiceID, { invoices: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    }
+    try { await xeroClient.accountingApi.updateCreditNote(xeroClient.tenantId, creditNoteID, { creditNotes: [{ status: "VOIDED" }] }); } catch { /* ignore */ }
+    try { await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] }); } catch { /* ignore */ }
+  };
+  const setStatus = (invoiceId, status) => updateXeroInvoice(invoiceId, undefined, undefined, undefined, undefined, undefined, status);
+  try {
+    const applied = unwrap(await createXeroCreditNoteAllocation(creditNoteID, [{ invoiceId: withCredit.invoiceID, amount: 40, date: today }]));
+    allocationID = applied[0]?.allocationID;
+    if (!allocationID) throw new Error("fixture credit-note allocation not created");
+
+    // Approval: DRAFT → AUTHORISED.
+    const approved = unwrap(await setStatus(toApprove.invoiceID, Invoice.StatusEnum.AUTHORISED));
+    if (approved.status !== Invoice.StatusEnum.AUTHORISED) throw new Error(`expected AUTHORISED, got ${approved.status}`);
+
+    // Disposal of an approved invoice with nothing applied: AUTHORISED → VOIDED.
+    const voided = unwrap(await setStatus(toApprove.invoiceID, Invoice.StatusEnum.VOIDED));
+    if (voided.status !== Invoice.StatusEnum.VOIDED) throw new Error(`expected VOIDED, got ${voided.status}`);
+    liveInvoices.delete(toApprove.invoiceID);
+
+    // Disposal of a draft: DRAFT → DELETED.
+    const deleted = unwrap(await setStatus(toDelete.invoiceID, Invoice.StatusEnum.DELETED));
+    if (deleted.status !== Invoice.StatusEnum.DELETED) throw new Error(`expected DELETED, got ${deleted.status}`);
+    liveInvoices.delete(toDelete.invoiceID);
+
+    // Refusal: still AUTHORISED, but carrying a credit note — the guard must name it.
+    const refused = await setStatus(withCredit.invoiceID, Invoice.StatusEnum.VOIDED);
+    if (!refused.isError) throw new Error("handler allowed a status change on an invoice with a credit note applied");
+    if (!/credit notes/.test(refused.error)) throw new Error(`refusal did not name the applied credit note: ${refused.error}`);
+
+    await cleanup();
+    pass("update-invoice sets status: approve, void, delete, refuse (PR #221)",
+      `draft ${approved.invoiceNumber} → ${approved.status} → ${voided.status}; draft ${deleted.invoiceNumber} → ${deleted.status}; part-credited invoice refused ("${String(refused.error).slice(0, 72)}…"); fixtures cleaned up`);
   } catch (e) {
     await cleanup();
     throw e;
