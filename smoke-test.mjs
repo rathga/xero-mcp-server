@@ -12,6 +12,7 @@
 // build that was loaded at Claude-Code startup — stale until the client restarts.
 // Add a test block here for every new feature PR before calling it verified.
 
+import { z } from "zod";
 import { AccountType, Invoice } from "xero-node";
 import { listXeroTrackingCategories } from "./dist/handlers/list-xero-tracking-categories.handler.js";
 import { listXeroProfitAndLoss } from "./dist/handlers/list-xero-profit-and-loss.handler.js";
@@ -35,6 +36,14 @@ import { createXeroLinkedTransaction } from "./dist/handlers/create-xero-linked-
 import { updateXeroLinkedTransaction } from "./dist/handlers/update-xero-linked-transaction.handler.js";
 import { deleteXeroLinkedTransaction } from "./dist/handlers/delete-xero-linked-transaction.handler.js";
 import ListInvoicesTool from "./dist/tools/list/list-invoices.tool.js";
+import CreateInvoiceTool from "./dist/tools/create/create-invoice.tool.js";
+import UpdateInvoiceTool from "./dist/tools/update/update-invoice.tool.js";
+import CreateBankTransactionTool from "./dist/tools/create/create-bank-transaction.tool.js";
+import UpdateBankTransactionTool from "./dist/tools/update/update-bank-transaction.tool.js";
+import CreateManualJournalTool from "./dist/tools/create/create-manual-journal.tool.js";
+import UpdateManualJournalTool from "./dist/tools/update/update-manual-journal-tool.js";
+import CreateRepeatingInvoiceTool from "./dist/tools/create/create-repeating-invoice.tool.js";
+import { createXeroInvoice } from "./dist/handlers/create-xero-invoice.handler.js";
 import { updateXeroInvoice } from "./dist/handlers/update-xero-invoice.handler.js";
 import { listXeroRepeatingInvoices } from "./dist/handlers/list-xero-repeating-invoices.handler.js";
 import { getXeroRepeatingInvoice } from "./dist/handlers/get-xero-repeating-invoice.handler.js";
@@ -548,6 +557,100 @@ await test("update-invoice sets status: approve, void, delete, refuse (PR #221)"
     await cleanup();
     pass("update-invoice sets status: approve, void, delete, refuse (PR #221)",
       `draft ${approved.invoiceNumber} → ${approved.status} → ${voided.status}; draft ${deleted.invoiceNumber} → ${deleted.status}; part-credited invoice refused ("${String(refused.error).slice(0, 72)}…"); fixtures cleaned up`);
+  } catch (e) {
+    await cleanup();
+    throw e;
+  }
+});
+
+// ---- Line-item tracking by name+option, no trackingCategoryID (fork issue #4) ----
+// Two blocks. The schema block costs zero API calls and covers the whole surface: every tool that
+// accepts line-item tracking must take {name, option} with no ID, and must still take an explicit
+// ID. The live block below proves the premise the change rests on.
+await test("every tracking-accepting tool takes a line without a trackingCategoryID (fork #4)", async () => {
+  const idLess = [{ name: "Any Category", option: "Any Option" }];
+  const withId = [{ name: "Any Category", option: "Any Option", trackingCategoryID: "any-guid" }];
+  const line = (tracking) => ({ description: "a line", quantity: 1, unitAmount: 1, accountCode: "200", taxType: "NONE", tracking });
+  const journalLine = (tracking) => ({ lineAmount: 1, accountCode: "200", tracking });
+  const payloads = (tracking) => [
+    [CreateInvoiceTool, { contactId: "a-contact", lineItems: [line(tracking)], type: "ACCREC" }],
+    [UpdateInvoiceTool, { invoiceId: "an-invoice", lineItems: [line(tracking)] }],
+    [CreateBankTransactionTool, { type: "SPEND", bankAccountId: "a-bank-account", contactId: "a-contact", lineItems: [line(tracking)] }],
+    [UpdateBankTransactionTool, { bankTransactionId: "a-bank-transaction", lineItems: [line(tracking)] }],
+    [CreateManualJournalTool, { narration: "a journal", manualJournalLines: [journalLine(tracking), journalLine(tracking)] }],
+    [UpdateManualJournalTool, { narration: "a journal", manualJournalID: "a-journal", manualJournalLines: [journalLine(tracking), journalLine(tracking)] }],
+    [CreateRepeatingInvoiceTool, { contactId: "a-contact", schedule: { period: 1, unit: "MONTHLY", startDate: "2026-01-01" }, lineItems: [line(tracking)] }],
+  ];
+  const rejectionsFor = (tracking) => payloads(tracking)
+    .map(([toolFactory, payload]) => ({ tool: toolFactory(), payload }))
+    .map(({ tool, payload }) => ({ name: tool.name, parsed: z.object(tool.schema).safeParse(payload) }))
+    .filter(({ parsed }) => !parsed.success)
+    .map(({ name, parsed }) => `${name}: ${parsed.error.issues.map((issue) => `${issue.path.join(".")} ${issue.message}`).join("; ")}`);
+
+  const rejectedIdLess = rejectionsFor(idLess);
+  if (rejectedIdLess.length) throw new Error(`tools rejected the ID-less form — ${rejectedIdLess.join(" | ")}`);
+  const rejectedWithId = rejectionsFor(withId);
+  if (rejectedWithId.length) throw new Error(`tools rejected the explicit-ID form — ${rejectedWithId.join(" | ")}`);
+
+  pass("every tracking-accepting tool takes a line without a trackingCategoryID (fork #4)",
+    `all ${payloads(idLess).length} tools accepted {name, option} with no ID, and still accept an explicit trackingCategoryID`);
+});
+
+// The premise fork issue #4 rests on: Xero resolves a line's tracking category from the category
+// and option *names* alone, so the MCP never has to make a caller look the GUID up first. The
+// xero-node type declaring the field optional only proves the SDK permits omitting it — this block
+// proves the tenant honours it. One DRAFT invoice carries both forms on separate lines, so the
+// ID-less line and the explicit-ID regression control are read back from the same record.
+//
+// Live result (2026-08-06, blocking probe run before any code was written, then re-run as this
+// block): PASS. INV-6474 line 1 sent {name:"Property", option:"17PS"} and read back with
+// trackingCategoryID 8ef94a0b-b447-42f3-8529-4576ce845d80 and trackingOptionID
+// 8c7d20ca-2fad-46bd-b763-e1c4602e136f resolved by Xero — byte-identical to the line that sent the
+// ID explicitly. Invoice DELETED and contact ARCHIVED afterwards. Cost 7 API calls.
+await test("Xero resolves line tracking from name+option alone (fork #4)", async () => {
+  await xeroClient.authenticate();
+  const cats = unwrap(await listXeroTrackingCategories(false));
+  const category = (cats ?? []).find((c) => (c.options?.length ?? 0) > 0);
+  if (!category) throw new Error("need a tracking category with at least one option");
+  const option = category.options[0];
+  const postable = (resp) => (resp.body.accounts ?? []).find((a) => !a.systemAccount && a.code)?.code;
+  const revCode = postable(await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="REVENUE" AND Status=="ACTIVE"'));
+  if (!revCode) throw new Error("need an ACTIVE non-system REVENUE account for fixture");
+  const contactResp = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: `ZZZ Tracking Test ${Date.now()}` }] });
+  const contactID = contactResp.body.contacts?.[0]?.contactID;
+
+  let invoiceID;
+  const cleanup = async () => {
+    if (invoiceID) { try { await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, invoiceID, { invoices: [{ status: "DELETED" }] }); } catch { /* ignore */ } }
+    try { await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] }); } catch { /* ignore */ }
+  };
+  // The two lines are told apart by amount on read-back, since Xero does not promise line order.
+  const idLessAmount = 1.11, explicitIdAmount = 2.22;
+  const line = (unitAmount, tracking) => ({ description: "ZZZ smoke test - delete", quantity: 1, unitAmount, accountCode: revCode, taxType: "NONE", tracking });
+  try {
+    const created = unwrap(await createXeroInvoice(contactID, [
+      line(idLessAmount, [{ name: category.name, option: option.name }]),
+      line(explicitIdAmount, [{ name: category.name, option: option.name, trackingCategoryID: category.trackingCategoryID }]),
+    ], "ACCREC", "ZZZ-SMOKE-DELETE"));
+    invoiceID = created.invoiceID;
+    if (!invoiceID) throw new Error("create returned no invoiceID");
+
+    const readBack = (await xeroClient.accountingApi.getInvoice(xeroClient.tenantId, invoiceID)).body.invoices?.[0];
+    const lineByAmount = (amount) => (readBack.lineItems ?? []).find((lineItem) => lineItem.lineAmount === amount);
+    const assertTrackingResolvedOn = (amount, label) => {
+      const tracking = lineByAmount(amount)?.tracking ?? [];
+      if (tracking.length !== 1) throw new Error(`${label} line came back with ${tracking.length} tracking entries, expected 1`);
+      const [entry] = tracking;
+      if (entry.name !== category.name || entry.option !== option.name) throw new Error(`${label} line resolved to ${entry.name}/${entry.option}, expected ${category.name}/${option.name}`);
+      if (entry.trackingCategoryID !== category.trackingCategoryID || entry.trackingOptionID !== option.trackingOptionID) throw new Error(`${label} line resolved to IDs ${entry.trackingCategoryID}/${entry.trackingOptionID}, expected ${category.trackingCategoryID}/${option.trackingOptionID}`);
+      return entry;
+    };
+    const resolved = assertTrackingResolvedOn(idLessAmount, "name-and-option-only");
+    assertTrackingResolvedOn(explicitIdAmount, "explicit-ID");
+
+    await cleanup();
+    pass("Xero resolves line tracking from name+option alone (fork #4)",
+      `${created.invoiceNumber}: line sent as {name:"${category.name}", option:"${option.name}"} came back with trackingCategoryID ${resolved.trackingCategoryID} and trackingOptionID ${resolved.trackingOptionID}; the explicit-ID line is unchanged; invoice deleted, contact archived`);
   } catch (e) {
     await cleanup();
     throw e;

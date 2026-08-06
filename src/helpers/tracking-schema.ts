@@ -1,11 +1,5 @@
 import { z } from "zod";
 
-/**
- * Shared Zod schema for a single tracking category/option pair on a line.
- * Used by invoice and manual journal tools so the shape stays consistent.
- * Both the Xero `LineItemTracking` and `TrackingCategory` types accept these
- * three fields, so the same schema works on invoice lines and manual journal lines.
- */
 export const trackingSchema = z.object({
   name: z
     .string()
@@ -19,8 +13,8 @@ export const trackingSchema = z.object({
     ),
   trackingCategoryID: z
     .string()
+    .optional()
     .describe(
-      "The ID of the tracking category. \
-    Can be obtained from the list-tracking-categories tool",
+      "The ID of the tracking category. Not needed: Xero resolves the category from the name and option above, so there is no need to call list-tracking-categories for it. Supply it only if you already have it to hand",
     ),
 });

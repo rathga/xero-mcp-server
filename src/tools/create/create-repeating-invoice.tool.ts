@@ -1,13 +1,7 @@
 import { z } from "zod";
 import { createXeroRepeatingInvoice } from "../../handlers/create-xero-repeating-invoice.handler.js";
 import { CreateXeroTool } from "../../helpers/create-xero-tool.js";
-
-const trackingSchema = z.object({
-  name: z.string().describe("The name of the tracking category. Can be obtained from the list-tracking-categories tool"),
-  option: z.string().describe("The name of the tracking option. Can be obtained from the list-tracking-categories tool"),
-  trackingCategoryID: z.string().describe("The ID of the tracking category. \
-    Can be obtained from the list-tracking-categories tool"),
-});
+import { trackingSchema } from "../../helpers/tracking-schema.js";
 
 const lineItemSchema = z.object({
   description: z.string().describe("The description of the line item"),
