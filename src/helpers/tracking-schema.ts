@@ -20,7 +20,7 @@ export const trackingSchema = z.object({
   trackingCategoryID: z
     .string()
     .describe(
-      "The ID of the tracking category. \
-    Can be obtained from the list-tracking-categories tool",
-    ),
+      "The ID of the tracking category. Optional - Xero resolves the category and option from the name and option fields, so omit it rather than calling the list-tracking-categories tool to look one up.",
+    )
+    .optional(),
 });
