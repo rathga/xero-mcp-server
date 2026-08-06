@@ -5,8 +5,7 @@ import { CreateXeroTool } from "../../helpers/create-xero-tool.js";
 const trackingSchema = z.object({
   name: z.string().describe("The name of the tracking category. Can be obtained from the list-tracking-categories tool"),
   option: z.string().describe("The name of the tracking option. Can be obtained from the list-tracking-categories tool"),
-  trackingCategoryID: z.string().describe("The ID of the tracking category. \
-    Can be obtained from the list-tracking-categories tool"),
+  trackingCategoryID: z.string().describe("The ID of the tracking category. Optional - Xero resolves the category and option from the name and option fields, so omit it rather than calling the list-tracking-categories tool to look one up.").optional(),
 });
 
 const lineItemSchema = z.object({
