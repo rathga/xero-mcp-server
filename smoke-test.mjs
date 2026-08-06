@@ -12,7 +12,7 @@
 // build that was loaded at Claude-Code startup — stale until the client restarts.
 // Add a test block here for every new feature PR before calling it verified.
 
-import { AccountType, Invoice } from "xero-node";
+import { AccountType, Invoice, LineAmountTypes, ManualJournal } from "xero-node";
 import { listXeroTrackingCategories } from "./dist/handlers/list-xero-tracking-categories.handler.js";
 import { listXeroProfitAndLoss } from "./dist/handlers/list-xero-profit-and-loss.handler.js";
 import { listXeroInvoices } from "./dist/handlers/list-xero-invoices.handler.js";
@@ -35,7 +35,11 @@ import { createXeroLinkedTransaction } from "./dist/handlers/create-xero-linked-
 import { updateXeroLinkedTransaction } from "./dist/handlers/update-xero-linked-transaction.handler.js";
 import { deleteXeroLinkedTransaction } from "./dist/handlers/delete-xero-linked-transaction.handler.js";
 import ListInvoicesTool from "./dist/tools/list/list-invoices.tool.js";
+import { createXeroInvoice } from "./dist/handlers/create-xero-invoice.handler.js";
 import { updateXeroInvoice } from "./dist/handlers/update-xero-invoice.handler.js";
+import { createXeroBankTransaction } from "./dist/handlers/create-xero-bank-transaction.handler.js";
+import { createXeroManualJournal } from "./dist/handlers/create-xero-manual-journal.handler.js";
+import { updateXeroManualJournal } from "./dist/handlers/update-xero-manual-journal.handler.js";
 import { listXeroRepeatingInvoices } from "./dist/handlers/list-xero-repeating-invoices.handler.js";
 import { getXeroRepeatingInvoice } from "./dist/handlers/get-xero-repeating-invoice.handler.js";
 import { createXeroRepeatingInvoice } from "./dist/handlers/create-xero-repeating-invoice.handler.js";
@@ -548,6 +552,125 @@ await test("update-invoice sets status: approve, void, delete, refuse (PR #221)"
     await cleanup();
     pass("update-invoice sets status: approve, void, delete, refuse (PR #221)",
       `draft ${approved.invoiceNumber} → ${approved.status} → ${voided.status}; draft ${deleted.invoiceNumber} → ${deleted.status}; part-credited invoice refused ("${String(refused.error).slice(0, 72)}…"); fixtures cleaned up`);
+  } catch (e) {
+    await cleanup();
+    throw e;
+  }
+});
+
+// ---- line-item tracking without a trackingCategoryID (PRs #180/#181/#192) ----
+// The tracking schema required a trackingCategoryID alongside the category name and option, so
+// `{ name, option }` was rejected by Zod before any call reached Xero. Xero resolves the category
+// from the name itself, so the requirement was our own over-constraint. This block proves that
+// against the live tenant on all four entity types that carry line-item tracking, and proves the
+// explicit-ID form did not regress: every fixture carries two tracked lines, one sent WITHOUT the
+// ID and one sent WITH it, and both must read back carrying the real category ID Xero resolved.
+// The two forms being indistinguishable in the result is the whole claim.
+await test("line-item tracking without a category ID (PRs #180/#181/#192)", async () => {
+  await xeroClient.authenticate();
+  const cats = unwrap(await listXeroTrackingCategories(false));
+  const category = (cats ?? []).find((c) => (c.options?.length ?? 0) > 0);
+  if (!category) throw new Error("no tracking category with options found");
+  const categoryID = category.trackingCategoryID;
+  const expected = { name: category.name, option: category.options[0].name };
+  const idless = { ...expected };
+  const withId = { ...expected, trackingCategoryID: categoryID };
+
+  // A line's tracking must come back naming the same category and option, and carrying the ID —
+  // whether or not the ID was sent. Anything else means Xero did not resolve it from the name.
+  const assertResolved = (what, line) => {
+    const applied = (line?.tracking ?? [])[0];
+    if (!applied) throw new Error(`${what}: line came back with no tracking`);
+    if (applied.trackingCategoryID !== categoryID) throw new Error(`${what}: category ID ${applied.trackingCategoryID} (expected ${categoryID})`);
+    if (applied.name !== expected.name || applied.option !== expected.option) throw new Error(`${what}: read back as "${applied.name}"/"${applied.option}"`);
+  };
+  // Several tools in one block, so a bare unwrap would report a failure without naming the tool.
+  const from = (what, response) => {
+    if (response.isError) throw new Error(`${what}: ${response.error}`);
+    return response.result;
+  };
+  const assertBothForms = (what, lines) => {
+    if ((lines?.length ?? 0) !== 2) throw new Error(`${what}: expected 2 lines, got ${lines?.length ?? 0}`);
+    assertResolved(`${what} (sent without the ID)`, lines[0]);
+    assertResolved(`${what} (sent with the ID)`, lines[1]);
+  };
+
+  const postable = (resp) => (resp.body.accounts ?? []).find((a) => !a.systemAccount && a.code)?.code;
+  const revCode = postable(await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Class=="REVENUE" AND Status=="ACTIVE"'));
+  if (!revCode) throw new Error("need an ACTIVE non-system REVENUE account for fixtures");
+  const bankResp = await xeroClient.accountingApi.getAccounts(xeroClient.tenantId, undefined, 'Type=="BANK" AND Status=="ACTIVE"');
+  const bankAccountID = bankResp.body.accounts?.[0]?.accountID;
+  if (!bankAccountID) throw new Error("need an ACTIVE BANK account for the bank-transaction fixture");
+
+  const contactResp = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: `ZZZ Tracking Test ${Date.now()}` }] });
+  const contactID = contactResp.body.contacts?.[0]?.contactID;
+
+  // Xero refuses to archive a contact that has ever carried a repeating invoice, so that fixture
+  // reuses the contact already stranded on the ledger for exactly that reason rather than
+  // stranding a fresh one on every run. If it has gone, make one advertising the same.
+  const strandedContactName = "ZZZ RI Diag - delete (unarchivable: had a repeating invoice)";
+  const strandedResp = await xeroClient.accountingApi.getContacts(xeroClient.tenantId, undefined, 'Name.StartsWith("ZZZ RI Diag - delete")');
+  let repeatingContactID = strandedResp.body.contacts?.[0]?.contactID;
+  if (!repeatingContactID) {
+    const made = await xeroClient.accountingApi.createContacts(xeroClient.tenantId, { contacts: [{ name: strandedContactName }] });
+    repeatingContactID = made.body.contacts?.[0]?.contactID;
+  }
+
+  const invoiceLine = (tracking) => ({ description: "ZZZ smoke test - delete", quantity: 1, unitAmount: 1, accountCode: revCode, taxType: "NONE", tracking: [tracking] });
+  const journalLine = (lineAmount, tracking) => ({ lineAmount, accountCode: revCode, description: "ZZZ smoke test - delete", tracking: [tracking] });
+
+  let invoiceID, bankTransactionID, manualJournalID, repeatingInvoiceID;
+  const cleanup = async () => {
+    if (invoiceID) { try { await xeroClient.accountingApi.updateInvoice(xeroClient.tenantId, invoiceID, { invoices: [{ status: "DELETED" }] }); } catch { /* ignore */ } }
+    if (bankTransactionID) { try { await xeroClient.accountingApi.updateBankTransaction(xeroClient.tenantId, bankTransactionID, { bankTransactions: [{ status: "DELETED" }] }); } catch { /* ignore */ } }
+    if (manualJournalID) { try { await xeroClient.accountingApi.updateManualJournal(xeroClient.tenantId, manualJournalID, { manualJournals: [{ status: "DELETED" }] }); } catch { /* ignore */ } }
+    if (repeatingInvoiceID) { try { await deleteXeroRepeatingInvoice(repeatingInvoiceID); } catch { /* ignore */ } }
+    try { await xeroClient.accountingApi.updateContact(xeroClient.tenantId, contactID, { contacts: [{ contactStatus: "ARCHIVED" }] }); } catch { /* ignore */ }
+  };
+  try {
+    // create-invoice / update-invoice
+    const invoice = from("create-invoice", await createXeroInvoice(contactID, [invoiceLine(idless), invoiceLine(withId)]));
+    invoiceID = invoice.invoiceID;
+    assertBothForms("create-invoice", invoice.lineItems);
+    const updatedInvoice = from("update-invoice", await updateXeroInvoice(invoiceID, [invoiceLine(idless), invoiceLine(withId)]));
+    assertBothForms("update-invoice", updatedInvoice.lineItems);
+
+    // create-bank-transaction. update-bank-transaction is deliberately NOT driven here: it is
+    // broken for every payload, tracking or not. Its handler spreads the transaction it just read
+    // back into the update body, and Xero rejects that with a 400 ValidationException — reproduced
+    // on 2026-08-06 with no tracking at all, while a minimal hand-built body against the same
+    // endpoint and the same transaction succeeded. That is a pre-existing handler defect with
+    // nothing to do with the tracking schema, so it is escalated rather than worked around here.
+    // Nothing about the ID-less form goes unproven: create-bank-transaction below sends the same
+    // tracking payload to the same entity, and the tool's schema is covered by the unit test.
+    const bankTransaction = from("create-bank-transaction", await createXeroBankTransaction("RECEIVE", bankAccountID, contactID, [invoiceLine(idless), invoiceLine(withId)]));
+    bankTransactionID = bankTransaction.bankTransactionID;
+    assertBothForms("create-bank-transaction", bankTransaction.lineItems);
+
+    // create-manual-journal / update-manual-journal — journal lines must balance, so the ID-less
+    // line is the debit and the explicit-ID line the matching credit.
+    const narration = "ZZZ smoke test - delete";
+    const journalLines = () => [journalLine(10, idless), journalLine(-10, withId)];
+    const manualJournal = from("create-manual-journal", await createXeroManualJournal(narration, journalLines(), undefined, LineAmountTypes.NoTax, ManualJournal.StatusEnum.DRAFT));
+    manualJournalID = manualJournal.manualJournalID;
+    assertBothForms("create-manual-journal", manualJournal.journalLines);
+    const updatedManualJournal = from("update-manual-journal", await updateXeroManualJournal(narration, manualJournalID, journalLines(), undefined, LineAmountTypes.NoTax));
+    assertBothForms("update-manual-journal", updatedManualJournal.journalLines);
+
+    // create-repeating-invoice — its own inline copy of the schema, deliberately not the shared
+    // helper (the helper does not exist on origin/main, where PR #192's branch is based).
+    const repeating = from("create-repeating-invoice", await createXeroRepeatingInvoice({
+      contactId: repeatingContactID,
+      schedule: { period: 1, unit: "MONTHLY", startDate: "2026-07-01", dueDate: 20, dueDateType: "OFFOLLOWINGMONTH" },
+      lineItems: [invoiceLine(idless), invoiceLine(withId)],
+      type: "ACCREC", status: "DRAFT", reference: "ZZZ-SMOKE-DELETE",
+    }));
+    repeatingInvoiceID = repeating.repeatingInvoiceID;
+    assertBothForms("create-repeating-invoice", from("get-repeating-invoice", await getXeroRepeatingInvoice(repeatingInvoiceID)).lineItems);
+
+    await cleanup();
+    pass("line-item tracking without a category ID (PRs #180/#181/#192)",
+      `"${expected.name}"/"${expected.option}" resolved to ${categoryID} from the name alone on all four entity types; explicit-ID lines unchanged; update-bank-transaction not driven (pre-existing handler defect, see comment); fixtures cleaned up`);
   } catch (e) {
     await cleanup();
     throw e;
