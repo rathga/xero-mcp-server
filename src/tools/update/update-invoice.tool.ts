@@ -27,8 +27,9 @@ const lineItemSchema = z.object({
 
 const UpdateInvoiceTool = CreateXeroTool(
   "update-invoice",
-  "Update an invoice in Xero. Draft, submitted and authorised invoices can be updated:\
-  all line items must be provided. Any line items not provided will be removed. Including existing line items.\
+  "Update an invoice in Xero. Draft, submitted and authorised invoices can be updated.\
+  Omit lineItems to leave the invoice's line items untouched.\
+  When changing line items, all line items must be provided. Any line items not provided will be removed. Including existing line items.\
   Do not modify line items that have not been specified by the user.\
   An authorised invoice can only be updated while it has no payments, credit notes, prepayments or overpayments applied.\
  When an invoice is updated, a deep link to the invoice in Xero is returned. \

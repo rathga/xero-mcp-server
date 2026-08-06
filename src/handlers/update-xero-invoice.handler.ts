@@ -60,17 +60,17 @@ async function updateInvoice(
   return response.body.invoices?.[0];
 }
 
-function paymentsAndAllocationsOn(invoice: Invoice | undefined): string[] {
+function appliedEntityLabels(invoice: Invoice): string[] {
   return [
-    invoice?.payments?.length ? "payments" : null,
-    invoice?.creditNotes?.length ? "credit notes" : null,
-    invoice?.prepayments?.length ? "prepayments" : null,
-    invoice?.overpayments?.length ? "overpayments" : null,
-  ].filter((applied) => applied !== null);
+    invoice.payments?.length ? "payments" : null,
+    invoice.creditNotes?.length ? "credit notes" : null,
+    invoice.prepayments?.length ? "prepayments" : null,
+    invoice.overpayments?.length ? "overpayments" : null,
+  ].filter((label) => label !== null);
 }
 
-function updateRejectionReason(invoice: Invoice | undefined): string | undefined {
-  const status = invoice?.status;
+function rejectionReasonForUpdate(invoice: Invoice): string | undefined {
+  const status = invoice.status;
 
   const isUpdatableStatus =
     status === Invoice.StatusEnum.DRAFT ||
@@ -81,7 +81,7 @@ function updateRejectionReason(invoice: Invoice | undefined): string | undefined
     return `Cannot update invoice because its status is ${status}. Only draft, submitted and authorised invoices can be updated.`;
   }
 
-  const applied = paymentsAndAllocationsOn(invoice);
+  const applied = appliedEntityLabels(invoice);
 
   if (applied.length > 0) {
     return `Cannot update invoice because it has ${applied.join(" and ")} applied to it. Remove them before updating the invoice.`;
@@ -105,7 +105,11 @@ export async function updateXeroInvoice(
   try {
     const existingInvoice = await getInvoice(invoiceId);
 
-    const rejectionReason = updateRejectionReason(existingInvoice);
+    if (!existingInvoice) {
+      throw new Error(`Could not find invoice ${invoiceId}`);
+    }
+
+    const rejectionReason = rejectionReasonForUpdate(existingInvoice);
 
     if (rejectionReason) {
       return {
