@@ -60,7 +60,7 @@ async function updateInvoice(
   return response.body.invoices?.[0];
 }
 
-function appliedEntityLabels(invoice: Invoice): string[] {
+function formatAppliedEntityLabels(invoice: Invoice): string[] {
   return [
     invoice.payments?.length ? "payments" : null,
     invoice.creditNotes?.length ? "credit notes" : null,
@@ -69,7 +69,7 @@ function appliedEntityLabels(invoice: Invoice): string[] {
   ].filter((label) => label !== null);
 }
 
-function rejectionReasonForUpdate(invoice: Invoice): string | undefined {
+function formatRejectionReason(invoice: Invoice): string | undefined {
   const status = invoice.status;
 
   const isUpdatableStatus =
@@ -81,7 +81,7 @@ function rejectionReasonForUpdate(invoice: Invoice): string | undefined {
     return `Cannot update invoice because its status is ${status}. Only draft, submitted and authorised invoices can be updated.`;
   }
 
-  const applied = appliedEntityLabels(invoice);
+  const applied = formatAppliedEntityLabels(invoice);
 
   if (applied.length > 0) {
     return `Cannot update invoice because it has ${applied.join(" and ")} applied to it. Remove them before updating the invoice.`;
@@ -109,7 +109,7 @@ export async function updateXeroInvoice(
       throw new Error(`Could not find invoice ${invoiceId}`);
     }
 
-    const rejectionReason = rejectionReasonForUpdate(existingInvoice);
+    const rejectionReason = formatRejectionReason(existingInvoice);
 
     if (rejectionReason) {
       return {

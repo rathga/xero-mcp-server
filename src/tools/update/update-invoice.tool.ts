@@ -38,7 +38,8 @@ const UpdateInvoiceTool = CreateXeroTool(
   {
     invoiceId: z.string().describe("The ID of the invoice to update."),
     lineItems: z.array(lineItemSchema).optional().describe(
-      "All line items must be provided. Any line items not provided will be removed. Including existing line items. \
+      "Omit this argument to leave the invoice's line items untouched. \
+      When changing line items, all line items must be provided. Any line items not provided will be removed. Including existing line items. \
       Do not modify line items that have not been specified by the user",
     ),
     reference: z.string().optional().describe("A reference number for the invoice."),
